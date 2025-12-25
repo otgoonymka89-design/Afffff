@@ -2,19 +2,11 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Idle + LipSync + Blink</title>
+  <title>Viseme LipSync</title>
   <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
 </head>
 
-<body style="margin:0; overflow:hidden">
-
-<!-- UI -->
-<button id="playBtn"
-  style="position:fixed;bottom:20px;left:20px;
-  padding:12px 18px;font-size:16px;z-index:10">
-▶ Play
-</button>
-
+<body style="margin:0">
 <a-scene>
   <a-assets>
     <audio id="voice" src="voice.mp3" preload="auto"></audio>
@@ -24,8 +16,7 @@
     gltf-model="avatar.glb"
     position="0 0 -2"
     scale="1 1 1"
-    animation-mixer="clip: Idle; loop: repeat"
-    talk-system>
+    viseme-lipsync>
   </a-entity>
 
   <a-light type="ambient" intensity="1"></a-light>
@@ -34,24 +25,22 @@
 </a-scene>
 
 <script>
-AFRAME.registerComponent('talk-system', {
+AFRAME.registerComponent('viseme-lipsync', {
   init() {
     const audio = document.querySelector('#voice');
-    const btn = document.querySelector('#playBtn');
-
-    // Audio context
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const src = ctx.createMediaElementSource(audio);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     src.connect(analyser);
     analyser.connect(ctx.destination);
+
     const data = new Uint8Array(analyser.frequencyBinCount);
 
     let mesh, dict, infl;
     this.el.addEventListener('model-loaded', () => {
       this.el.getObject3D('mesh').traverse(n => {
-        if (n.morphTargetDictionary) {
+        if (n.morphTargetDictionary && n.morphTargetInfluences) {
           mesh = n;
           dict = n.morphTargetDictionary;
           infl = n.morphTargetInfluences;
@@ -59,86 +48,56 @@ AFRAME.registerComponent('talk-system', {
       });
     });
 
-    const V = n => dict && dict[n] !== undefined ? dict[n] : -1;
-    const smooth = (i,v)=>{ if(i>=0) infl[i]=infl[i]*0.6+v*0.4 };
-    const clamp = v => Math.max(0,Math.min(1,v));
+    const V = name => dict && dict[name] !== undefined ? dict[name] : -1;
 
-    // Idle control
-    const stopIdle = () => {
-      const m = this.el.components['animation-mixer'];
-      if (m && m.mixer) m.mixer.stopAllAction();
-    };
-    const playIdle = () => {
-      const m = this.el.components['animation-mixer'];
-      if (m) m.playAction('Idle');
+    const vis = {
+      aa: () => V('viseme_aa'),
+      ee: () => V('viseme_E'),
+      ii: () => V('viseme_I'),
+      oo: () => V('viseme_O'),
+      uu: () => V('viseme_U'),
+      sil: () => V('viseme_sil'),
+      open: () => V('mouthOpen')
     };
 
-    // Blink (нүд анивч)
-    let blinkTime = 0;
-    const blink = () => {
-      const i = V('eyeBlinkLeft');
-      const j = V('eyeBlinkRight');
-      if (i>=0) infl[i] = 1;
-      if (j>=0) infl[j] = 1;
-      setTimeout(()=>{
-        if (i>=0) infl[i] = 0;
-        if (j>=0) infl[j] = 0;
-      }, 120);
-      blinkTime = Math.random()*4000 + 2000;
-    };
-    setTimeout(blink, 2000);
+    const smooth = (i, v) => { if (i >= 0) infl[i] = infl[i]*0.6 + v*0.4; };
 
-    // Lip-sync loop
     const animate = () => {
       analyser.getByteFrequencyData(data);
+      const low = avg(0, 200);     // aa / oo
+      const mid = avg(200, 1200);  // ee / ii
+      const high = avg(1200, 4000);// ss / silence
 
-      let low=0, mid=0;
-      for(let i=0;i<300;i++) low+=data[i];
-      for(let i=300;i<1200;i++) mid+=data[i];
-      low/=300*255; mid/=900*255;
+      // reset
+      Object.values(vis).forEach(f => { const i=f(); if(i>=0) infl[i]=0; });
 
-      // reset visemes
-      ['viseme_aa','viseme_E','viseme_I','viseme_O','viseme_U','mouthOpen']
-        .forEach(v=>{ const i=V(v); if(i>=0) infl[i]=0 });
-
-      smooth(V('viseme_aa'), clamp(low*2.2));
-      smooth(V('viseme_O'),  clamp(low*1.8));
-      smooth(V('viseme_E'),  clamp(mid*1.6));
-      smooth(V('viseme_I'),  clamp(mid*1.4));
-      smooth(V('viseme_U'),  clamp(low*1.2));
-      smooth(V('mouthOpen'),clamp(low*2.4));
+      if (high < 0.02) smooth(vis.sil(), 1);
+      smooth(vis.aa(), clamp(low*1.8));
+      smooth(vis.ee(), clamp(mid*1.4));
+      smooth(vis.ii(), clamp(mid*1.2));
+      smooth(vis.oo(), clamp(low*1.2));
+      smooth(vis.uu(), clamp(low));
+      smooth(vis.open(), clamp(low*1.6));
 
       requestAnimationFrame(animate);
     };
 
-    // Button logic
-    let playing = false;
-    btn.onclick = async () => {
-      await ctx.resume();
-      if (!playing) {
-        audio.play();
-        stopIdle();
-        animate();
-        btn.innerText = "⏸ Pause";
-      } else {
-        audio.pause();
-        playIdle();
-        btn.innerText = "▶ Play";
-      }
-      playing = !playing;
+    const avg = (a,b) => {
+      let s=0,c=0;
+      for(let i=a;i<b && i<data.length;i++){ s+=data[i]; c++; }
+      return (s/c)/255;
     };
+    const clamp = v => Math.max(0, Math.min(1, v));
 
-    audio.addEventListener('ended', () => {
-      playIdle();
-      btn.innerText = "▶ Play";
-      playing = false;
-    });
-
-    // Blink loop
-    setInterval(blink, () => blinkTime);
+    // click to start (browser policy)
+    window.addEventListener('click', async () => {
+      await ctx.resume();
+      audio.play();
+      animate();
+    }, { once:true });
   }
 });
 </script>
-
 </body>
+
 </html>
